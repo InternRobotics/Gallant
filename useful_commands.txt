@@ -1,0 +1,9 @@
+python -m torch.distributed.run --nproc-per-node 8 train_ppo.py task=G1LidarNew algo=ppo_hussar task.num_envs=1024  wandb.project=valiant total_frames=32_00_000_000 algo.multi_critic=False exp_name=
+python eval_run.py -r * -p
+python play.py task=G1LidarNew algo=ppo_hussar checkpoint_path=**.pt
+python train_ppo.py task=G1LidarNew  task.num_envs=4 exp_name=test wandb.mode=disabled total_frames=16_00_000_000 algo.multi_critic=False algo=ppo_hussar
+
+python -m torch.distributed.run --nproc-per-node 8 train_ppo.py task=G1LidarNew  task.num_envs=1024  wandb.project=pillar total_frames=64_00_000_000 algo.multi_critic=False algo=ppo_gallant exp_name=fk 
+
+
+python -m torch.distributed.run --nproc-per-node 8 train_ppo.py task=G1LidarNew  task.num_envs=1250  wandb.project=1102night total_frames=64_00_000_000 algo.multi_critic=False algo=ppo_hussar exp_name=

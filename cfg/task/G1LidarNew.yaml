@@ -1,0 +1,181 @@
+# @package task
+project: gallant
+name: Gallant
+env_class: GallantEnvIsaac
+
+viewer:
+  resolution: [1280, 720]
+  lookat: [0., 0., 0.]
+  eye: [4.0, 4.0, 4.0]
+
+robot: 
+  name: g1_waist_unlocked
+terrain: hussar_3d
+
+# common
+num_envs: 4
+max_episode_length: 499
+allocate_time: 10
+
+sim:
+  step_dt: 0.02
+  isaac_physics_dt: 0.005
+  mujoco_physics_dt: 0.002
+
+input:
+  action:
+    _target_: JointPosition
+    action_scaling: 
+      .*hip_pitch.*: 0.548
+      .*hip_roll.*: 0.351
+      .*hip_yaw.*: 0.548
+      .*knee.*: 0.351
+      waist_yaw_joint: 0.541
+      waist_roll_joint: 0.439
+      waist_pitch_joint: 0.439
+      .*ankle.*: 0.439
+      .*shoulder.*: 0.173
+      .*elbow_joint: 0.173
+      .*wrist_roll.*: 0.173
+      .*wrist_pitch.*: 0.293
+      .*wrist_yaw.*: 0.293
+    max_delay: 2
+    alpha_range: [0.6, 1.0]
+
+command:
+  _target_: LocoNavigation
+  feet_names: .*ankle_roll_link
+  pelvis_names: pelvis
+  robot_name: G1
+  max_target_height: 1.32
+  offset: 0.12
+  random_command: False
+  stand_prob: 0.0
+  use_curriculum: true
+
+observation:
+  # command:
+  policy:
+    command: {} # base x + y + pass time + rest time
+    root_angvel_b:  {steps: 6, noise_std: 0.2} #0.05}
+    # root_linvel_b:  {}
+    gravity_multistep: {steps: 6, noise_std: 0.05} # t t-1 t-2
+    joint_pos_multistep: {steps: 6, noise_std: 0.05}
+    joint_vel_multistep: {steps: 6, noise_std: 0.2}
+    prev_actions: {steps: 4}
+    # height_scan: {x_range: [-0.8, 0.8], y_range: [-0.8, 0.8], resolution: [0.05, 0.05], flatten: true, noise_scale: 0.01}
+  priv:
+    height_scan: {x_range: [-0.8, 0.8], y_range: [-0.8, 0.8], resolution: [0.05, 0.05], flatten: true, noise_scale: 0.0}
+    root_linvel_b:    {}
+  #   body_height:      {body_names: .*ankle_roll_link, clamp_max: 0.2}
+  grid_map_:
+    lidar_voxel_map: {
+      pattern: "n z x y", noise_std: 0.01, include_self: true,
+      num_scan: 128, random_offset: true,
+      resolution: [0.05, 0.05, 0.05],
+      # resolution: [0.05, 0.05, 0.05],
+      hole_prob: 0.02,
+      obs_delay_range: [6,14],
+    }
+
+reward:
+  loco:
+    velocity_direction:     {weight: 2.0} # tree 4x # 1.5 # 1.25
+    feet_ground_parallel_bin:    {weight: 1.5, body_names: .*ankle_roll_link}
+    # solid_step:             {weight: 2.0, thres: 0.01}
+    feet_ground_slip: {weight: 1.0, body_names: [.*ankle_roll_link]}
+    feet_clearance_height:  {weight: 1.5} # platform 5x
+    
+    # penalty_fast_ang_vel: {weight: 2.0, threshold: 1.0}
+
+    reach_target_pos:       {weight: 2.0} # 1.0
+    reach_target_yaw:       {weight: 1.5}
+    reaching_target:        {weight: 1.0}
+    tracking_head_height:   {weight: 1.5} # ceil is 4x
+    stall_penalty:          {weight: 1.0, max_vel: 0.8, min_vel: 0.4} # 0.5
+    orientation_torso:      {weight: 0.5, body_names: ['torso_link']} # 0.1
+    orientation_pelvis:     {weight: 1.0, body_names: ["pelvis"]} # 1.0
+    penalize_contact_body:  {_target_: penalize_contact, weight: 0.2, body_names: ["pelvis", ".*_hip_.*_link", ".*knee.*"]} # 0.005
+    penalize_contact_hand:  {_target_: penalize_contact, weight: 0.1, body_names: [".*(wrist|elbow).*",  ".*shoulder_.*_link"]}
+    penalize_contact_torso: {_target_: penalize_contact, weight: 1.0, body_names: ["torso_link"]}
+    feet_ground_parallel:   {weight: 0.1, body_names: .*ankle_roll_link} # 5.0
+
+    linvel_z_l2_new:            {weight: 0.5} #0.5 stair 5x
+    angvel_xy_l2:           {weight: 0.05}
+    action_rate_l2:         {weight: 1e-2}
+    action_rate2_l2:        {weight: 5e-3} # smoothness NOTE Sep1 used 5e-3 previously
+
+    hip_yaw_dev_l2:     {_target_: joint_deviation_l2, weight: 0.5, joint_names: [.*hip_yaw_joint]} # 0.25 0.5
+    hip_roll_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, joint_names: [.*hip_roll_joint]} # 0.25 0.5
+    hip_pitch_dev_l2:     {_target_: joint_deviation_l2, weight: 0.05, joint_names: [.*hip_pitch_joint]}
+    ankle_pitch_dev_l2:   {_target_: joint_deviation_l2, weight: 0.1, joint_names: ".*ankle_pitch.*"}
+    ankle_roll_dev_l2:   {_target_: joint_deviation_l2, weight: 1.5, joint_names: ".*ankle_roll.*"}
+    waist_roll_yaw_dev_l2:   {_target_: joint_deviation_l2, weight: 1.0, joint_names: ".*waist_(roll|yaw).*"} # 0.25
+    waist_pitch_dev_l2:   {_target_: joint_deviation_l2, weight: 0.5, joint_names: ".*waist_pitch.*"}
+    arm_roll_yaw_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, joint_names: [.*shoulder_(roll|yaw).*]} # 1.0
+    arm_dev_l2:       {_target_: joint_deviation_l2, weight: 0.5, joint_names: [.*shoulder_pitch.*, .*elbow.*]} # 1.0
+    wrist_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, joint_names: [.*wrist.*]} # 1.0
+    knee_dev_l2:      {_target_: joint_deviation_l2, weight: 0.02, joint_names: ".*knee.*"}
+
+    joint_acc_l2:           {weight: 2.5e-7}
+    dof_pos_limits:         {weight: 1.0}
+    feet_distance_lateral:  {weight: 1.5, body_names: [.*ankle_roll.*], least_distance: 0.2, most_distance: 0.28} # 1.5
+    knee_distance_lateral:  {weight: 1.5, body_names: [.*hip_yaw.*, ".*knee.*"], least_distance: 0.2, most_distance: 0.28} # 2.0
+    feet_parallel:          {weight: 1.0, body_names: .*ankle_roll_link} # 1.0
+    energy_l2:              {weight: 2.0e-10}  
+    feet_stumble:           {weight: 1.0, body_names: .*ankle_roll_link}
+    num_foot_contact:       {weight: 2.0} #1.0
+    torques_scaled:         {weight: 2.5e-6}
+    dof_vel:                {weight: 1.0e-4}
+    dof_vel_limits:         {weight: 2.0e-3}
+    torque_limits:          {weight: 0.01}
+    feet_contact_forces:    {weight: 1e-6, body_names: [.*ankle_roll_link], max_contact_force: 250.0}
+    contact_momentum:       {weight: 2.5e-4, body_names: [.*ankle_roll_link]}
+
+  # debug:
+  #   feet_slip:              {weight: 1.5, enabled: false, body_names: [.*ankle_roll_link]} # stair 4x
+    # feet_contact_count: {weight: 1.0, enabled: false, body_names: .*ankle_roll_link}
+
+    # single_foot_contact_hussar:    {weight: 1.0} # no_fly
+    # action_vanish:          {weight: 0.1} 
+      # no_reach:               {weight: 1.0} # no_reach
+    # adaptive_target_height: {weight: 1.0} # 1.0
+    # penalize_contact:        {weight: 0.002, body_names: ["pelvis", "torso_link", ".*_hip_.*_link", ".*shoulder_.*_link", ".*(wrist|elbow).*"]}
+    # survival:           {weight: 1.0}
+
+randomization:
+  perturb_body_mass:
+    (?!(pelvis|torso_link)).*: [0.8, 1.2]
+    pelvis: [0.8, 1.2]
+  perturb_body_materials:
+    body_names: ".*ankle_roll_link"
+    static_friction_range: [0.5, 2.0]
+    dynamic_friction_range: [0.5, 2.0]
+    restitution_range: [0.05, 0.4]
+  motor_params_armature:
+    stiffness_range:
+      .*: [0.8, 1.2]
+    damping_range:
+      .*: [0.8, 1.2]
+    armature_range:
+      .*: [1.0, 1.0]
+  reset_joint_states_uniform:
+    pos_ranges:
+      .*: [-0.1, 0.1]
+    vel_ranges:
+      .*: [-0.1, 0.1]
+    rel: true
+  perturb_body_com:
+    body_names: ["torso_link"]
+    pos_range: [-0.05, 0.05]
+termination:
+  force_contact:
+    body_names: 
+    - "torso_link"
+    - ".*_hip.*"
+    - ".*knee.*"
+    threshold: 100.0
+  gallant.pillar_fall: {body_names: ".*ankle_roll_link", threshold: -0.1}
+  gallant.no_moving: {thres: 1.0}
+  gallant.feet_too_close: {body_names: ".*ankle_roll_link", thres: 0.05}
+  fall_over: {xy_thres: 0.8}

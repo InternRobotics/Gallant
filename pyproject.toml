@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gallant"
+version = "0.1.0"
+description = "Gallant project for active adaptation experiments."
+readme = "README.md"
+authors = [
+    { name = "Qingwei Ben", email = "elgceben@gmail.com" },
+    { name = "Botian Xu", email = "btx0424@outlook.com" },
+]
+license = { text = "SEE LICENSE FILE" }
+keywords = ["reinforcement-learning", "lidar", "autonomous-driving"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "active_adaptation",
+    "shapely",
+]
+
+[project.entry-points."active_adaptation.projects"]
+gallant = "gallant"
+
+[project.entry-points."active_adaptation.learning"]
+gallant = "gallant_learning"
+
+[tool.setuptools.package-data]
+"*" = ["**/*"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gallant", "gallant_learning"]
