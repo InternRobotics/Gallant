@@ -48,3 +48,6 @@ If you find Gallant useful in your research, please cite:
   year={2025}
 }
 ```
+
+### Communication
+If you have any specific questions, please drop an e-mail to elgceben@gmail.com
