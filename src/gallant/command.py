@@ -169,11 +169,22 @@ class LocoNavigation(Command):
 
         from active_adaptation.envs.terrain import BetterTerrainImporter, BetterTerrainGenerator
         self.terrain_importer: BetterTerrainImporter = self.env.scene.terrain
-        self.terrain_generator: BetterTerrainGenerator = self.terrain_importer.terrain_generator
+        self.terrain_type = self.terrain_importer.cfg.terrain_type
+        self.terrain_generator: BetterTerrainGenerator | None = getattr(
+            self.terrain_importer, "terrain_generator", None
+        )
 
-        if self.use_curriculum and self.terrain_importer.cfg.terrain_type == "generator":
-            assert self.terrain_generator.cfg.curriculum, "Curriculum must be enabled in the terrain generator."
-        if self.terrain_importer.cfg.terrain_type == "usd":
+        # Curriculum / sub-terrain typing only apply to generator terrains (e.g. hussar).
+        self.use_curriculum = (
+            self.use_curriculum
+            and self.terrain_type == "generator"
+            and self.terrain_generator is not None
+        )
+        if self.use_curriculum:
+            assert self.terrain_generator.cfg.curriculum, (
+                "Curriculum must be enabled in the terrain generator."
+            )
+        if self.terrain_type == "usd":
             self._origins = torch.tensor(TEST_TERRAIN_ORIGINS, device=self.device)
             self._test_target = torch.zeros(self.num_envs, 3, device=self.device)  # sampled from _origins
         else:
@@ -341,19 +352,19 @@ class LocoNavigation(Command):
 
         init_root_state = self.init_root_state[env_ids].clone()
 
-        if self.terrain_importer.cfg.terrain_type == "plane":
+        if self.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
-        elif self.terrain_importer.cfg.terrain_type == "generator":
+        elif self.terrain_type == "generator":
             idx = torch.randint(0, len(self._origins), (len(env_ids),), device=self.device)
             origins = self._origins[idx]
-        elif self.terrain_importer.cfg.terrain_type == "usd":
+        elif self.terrain_type == "usd":
             idx = torch.multinomial(torch.ones(len(self._origins), device=self.device).expand(len(env_ids), -1), 2, replacement=False)
             origins = self._origins[idx[:, 0]]
             self._test_target[env_ids] = self._origins[idx[:, 1]]
         else:
-            raise ValueError(f"Unsupported terrain type: {self.terrain.cfg.terrain_type}")
+            raise ValueError(f"Unsupported terrain type: {self.terrain_type}")
 
-        if self.terrain_importer.cfg.terrain_type == "generator":
+        if self.terrain_type == "generator":
             num_cols, num_rows = self.terrain_generator.cfg.num_cols, self.terrain_generator.cfg.num_rows
             sub_terrain_size = self.terrain_generator.cfg.size[0]
             sub_terrain_types = self.terrain_generator.sub_terrain_types.reshape(num_rows, num_cols).clone().to(self.device)
@@ -361,6 +372,9 @@ class LocoNavigation(Command):
             env_y = (torch.floor(origins[:, 1] / sub_terrain_size) + num_cols // 2).to(torch.long)
             self.raw_terrain_types[env_ids] = sub_terrain_types[env_x, env_y]
             self.terrain_types[env_ids, :] = (self.raw_terrain_types[env_ids].unsqueeze(-1) >> torch.arange(2, -1, -1).to(self.device)) & 1
+        elif self.terrain_type == "plane":
+            self.raw_terrain_types[env_ids] = 0
+            self.terrain_types[env_ids] = 0
 
         orientations = quat_mul(
             init_root_state[:, 3:7],
@@ -421,8 +435,21 @@ class LocoNavigation(Command):
         return mask.nonzero().squeeze(-1)
     
     def sample_target(self, env_ids: torch.Tensor):
-        if self.terrain_importer.cfg.terrain_type == "usd":
+        if self.terrain_type == "usd":
             self.target_pos_w[env_ids] = self._test_target[env_ids]
+            self.target_reached[env_ids] = 0
+            return
+        if self.terrain_type == "plane":
+            # Uniform offset in a disk of radius 4 m (no hussar tile-border snap).
+            n = len(env_ids)
+            angle = torch.rand(n, device=self.device) * (2.0 * torch.pi)
+            radius = torch.sqrt(torch.rand(n, device=self.device)) * 4.0
+            offset = torch.stack(
+                [radius * torch.cos(angle), radius * torch.sin(angle), torch.zeros(n, device=self.device)],
+                dim=-1,
+            )
+            self.target_pos_w[env_ids] = self.asset.data.root_pos_w[env_ids] + offset
+            self.target_reached[env_ids] = 0
             return
         wp.launch(
             sample_target_kernel,

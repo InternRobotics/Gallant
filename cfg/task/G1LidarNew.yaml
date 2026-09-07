@@ -70,15 +70,21 @@ observation:
     root_linvel_b:    {}
   #   body_height:      {body_names: .*ankle_roll_link, clamp_max: 0.2}
   grid_map_:
-    lidar_voxel_map: {
+    lidar_voxel_map: {  # legacy (include_self flag, delayed-grid viz on live pose)
       pattern: "n z x y", noise_std: 0.01, include_self: true,
-      num_scan: 128,
-      random_offset: true,
-      resolution: [0.05, 0.05, 0.05],
-      hole_prob: 0.02,
-      # obs_delay_range: [6,14],
+      num_scan: 128, random_offset: true,
+      resolution: [0.05, 0.05, 0.05], hole_prob: 0.02,
       obs_delay_range: [1,1],
     }
+    # lidar_voxel_map_v2: {
+    #   pattern: "n z x y", noise_std: 0.01,
+    #   num_scan: 128,
+    #   random_offset: true,
+    #   resolution: [0.05, 0.05, 0.05],
+    #   hole_prob: 0.02,
+    #   # obs_delay_range: [6,14],
+    #   obs_delay_range: [1,1],
+    # }
 
 reward:
   loco:

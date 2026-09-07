@@ -80,14 +80,14 @@ class GallantEnvIsaac(IsaacBackendEnv):
 
     supported_backends = ("isaaclab",)
 
-    @override
-    def setup_scene(self):
-        super().setup_scene()
-        terrain = getattr(self.scene, "terrain", None)
-        cfg = getattr(terrain, "cfg", None) if terrain is not None else None
-        if cfg is None:
-            return
-        from isaaclab.sim import use_stage
+    # @override
+    # def setup_scene(self):
+    #     super().setup_scene()
+    #     terrain = getattr(self.scene, "terrain", None)
+    #     cfg = getattr(terrain, "cfg", None) if terrain is not None else None
+    #     if cfg is None:
+    #         return
+    #     from isaaclab.sim import use_stage
 
-        with use_stage(self.sim._sim.get_initial_stage()):
-            add_skin_by_tiles(cfg, z_plane=-0.02, thickness=0.02, col_axis="y")
+        # with use_stage(self.sim._sim.get_initial_stage()):
+        #     add_skin_by_tiles(cfg, z_plane=-0.02, thickness=0.02, col_axis="y")

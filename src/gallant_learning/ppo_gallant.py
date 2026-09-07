@@ -33,7 +33,7 @@ from einops.layers.torch import Rearrange
 from torchrl.data import TensorSpec
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import TensorDictPrimer
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import (
     TensorDictModuleBase,
     TensorDictModule as Mod,
@@ -198,7 +198,11 @@ class PPOPolicy(TensorDictModuleBase):
 
         # when multi_critic is False, aggregate (sum and clip) the rewards BEFORE computing the advantage
         self.multi_critic = self.cfg.multi_critic
-        self.num_rewards = reward_spec["reward"].shape[-1]
+        reward_leaf = reward_spec["reward"]
+        if hasattr(reward_leaf, "keys"):
+            self.num_rewards = len(list(reward_leaf.keys(True, True)))
+        else:
+            self.num_rewards = int(reward_leaf.shape[-1])
 
         self.entropy_coef = self.cfg.entropy_coef
         self.max_grad_norm = 1.0
@@ -323,7 +327,7 @@ class PPOPolicy(TensorDictModuleBase):
             policy = torch.compile(policy, fullgraph=True)
         return policy
     
-    def on_stage_start(self, stage: str):
+    def on_stage_start(self, stage: str, env: "_EnvBase"):
         pass
 
     @VecNorm.freeze()
@@ -337,7 +341,9 @@ class PPOPolicy(TensorDictModuleBase):
             tensordict["adv"] = normalize(tensordict["adv"].sum(-1, True), subtract_mean=True)
         else:
             # aggregate the rewards BEFORE computing the advantage
-            tensordict[REWARD_KEY] = tensordict[REWARD_KEY].sum(-1, True).clip(min=0.)
+            tensordict[REWARD_KEY] = self._flatten_rewards(
+                tensordict[REWARD_KEY], clamp_min=0.0
+            )
             self._compute_advantage(tensordict, self.critic, "adv", "ret")
             tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
@@ -381,7 +387,8 @@ class PPOPolicy(TensorDictModuleBase):
 
         out["critic/value_mean"] = tensordict["ret"].mean().item()
         out["critic/value_std"] = tensordict["ret"].std().item()
-        out["critic/neg_rew_ratio"] = (tensordict[REWARD_KEY].sum(-1) <= 0.).float().mean().item()
+        neg_rew = self._flatten_rewards(tensordict[REWARD_KEY], clamp_min=None)
+        out["critic/neg_rew_ratio"] = (neg_rew.sum(-1) <= 0.).float().mean().item()
         out["critic/feature_norm"] = critic_feature_norm.item()
         out["critic/value_diff"] = value_diff.item()
         if active_adaptation.is_distributed():
@@ -392,6 +399,19 @@ class PPOPolicy(TensorDictModuleBase):
         tensordict = self.vecnorm(tensordict)
         tensordict = self.critic(tensordict)
         return tensordict
+
+    @staticmethod
+    def _flatten_rewards(
+        rewards: torch.Tensor | TensorDictBase,
+        clamp_min: float | None = None,
+    ) -> torch.Tensor:
+        """Collapse nested group rewards to ``(..., 1)`` for GAE / logging."""
+        if isinstance(rewards, TensorDictBase):
+            rewards = torch.cat(list(rewards.values()), dim=-1)
+        rewards = rewards.sum(-1, keepdim=True)
+        if clamp_min is not None:
+            rewards = rewards.clamp_min(clamp_min)
+        return rewards
 
     @torch.no_grad()
     def _compute_advantage(
@@ -411,6 +431,9 @@ class PPOPolicy(TensorDictModuleBase):
         next_values = tensordict["next", "state_value"]
 
         rewards = tensordict[REWARD_KEY]
+        if isinstance(rewards, TensorDictBase):
+            # multi_critic: keep one channel per reward group
+            rewards = torch.cat(list(rewards.values()), dim=-1)
         discount = tensordict["next", "discount"]
         terms = tensordict[TERM_KEY]
         dones = tensordict[DONE_KEY]
