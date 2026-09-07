@@ -28,8 +28,10 @@ import torch.distributions as D
 import warnings
 import functools
 import math
+from contextlib import nullcontext
 from einops.layers.torch import Rearrange
 
+from torch.amp import GradScaler, autocast
 from torchrl.data import TensorSpec
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import TensorDictPrimer
@@ -42,12 +44,12 @@ from tensordict.nn import (
 
 from hydra.core.config_store import ConfigStore
 from dataclasses import dataclass
-from typing import Union, Tuple
+from typing import Union, Tuple, TYPE_CHECKING
 from collections import OrderedDict
 
 from active_adaptation.learning.modules import IndependentNormal, VecNorm
 from active_adaptation.learning.ppo.common import *
-from active_adaptation.learning.utils.opt import OptimizerGroup
+from active_adaptation.learning.utils.opt import MuonAdamWWrapper
 
 torch.set_float32_matmul_precision('high')
 
@@ -55,6 +57,9 @@ import active_adaptation
 import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
 from active_adaptation.utils.torchrl import EnsembleCritic
+
+if TYPE_CHECKING:
+    from active_adaptation.envs.env_base import _EnvBase
 
 
 @dataclass
@@ -69,6 +74,8 @@ class PPOConfig:
     desired_kl: Union[float, None] = 0.02
     entropy_coef: float = 0.003
     muon: bool = False
+    # FP16 AMP (CUDA only). Off by default — PPO ratios/KL are sensitive to numerics.
+    use_amp: bool = False
 
     multi_critic: bool = False
     encoder_type: str = "concat" # How to combine the CNN and MLP features, "concat" or "attn"
@@ -248,7 +255,7 @@ class PPOPolicy(TensorDictModuleBase):
         
         self.critic = Seq(
             Mod(EncoderClass(conv3d=False), ["_obs_normed", self.terrain_key, "mask"], ["_critic_feature"]),
-            Mod(nn.LazyLinear(1), ["_critic_feature"], ["state_value"])
+            Mod(Critic(1), ["_critic_feature"], ["state_value"])
         ).to(self.device)
 
         self.vecnorm(fake_input)
@@ -272,40 +279,14 @@ class PPOPolicy(TensorDictModuleBase):
         if self.cfg.multi_critic:
             self.critic = EnsembleCritic(self.critic, num_copies=self.num_rewards, init_=init_)
 
-        if active_adaptation.is_distributed():
-            self.world_size = active_adaptation.get_world_size()
-            if self.cfg.use_ddp:
-                self.actor = DDP(self.actor)
-                self.critic = DDP(self.critic, static_graph=True)
-            else:
-                for param in self.actor.parameters():
-                    distr.broadcast(param, src=0)
-                for param in self.critic.parameters():
-                    distr.broadcast(param, src=0)
-        
-        def is_matrix_shaped(param: torch.Tensor) -> bool:
-            return param.dim() == 2
-
-        if self.cfg.muon:
-            muon = torch.optim.Muon([
-                {"params": [p for p in self.actor.parameters() if is_matrix_shaped(p)]},
-                {"params": [p for p in self.critic.parameters() if is_matrix_shaped(p)]},
-            ], lr=self.cfg.lr, adjust_lr_fn="match_rms_adamw", weight_decay=0.01)
-
-            adamw = torch.optim.AdamW([
-                {"params": [p for p in self.actor.parameters() if not is_matrix_shaped(p)]},
-                {"params": [p for p in self.critic.parameters() if not is_matrix_shaped(p)]},
-            ], lr=self.cfg.lr, weight_decay=0.01)
-            self.opt = OptimizerGroup([muon, adamw])
-        else:
-            self.opt = torch.optim.AdamW(
-                [
-                    {"params": self.actor.parameters()},
-                    {"params": self.critic.parameters()},
-                ],
-                lr=self.cfg.lr,
-                weight_decay=0.01
-            )
+        # DDP / optimizer / AMP are wired in on_stage_start (after env stage starts).
+        self.opt = None
+        self.should_reduce_grads = False
+        self.world_size = 1
+        _dev = torch.device(self.device)
+        self._amp_device_type = _dev.type
+        self._amp_enabled = bool(self.cfg.use_amp and _dev.type == "cuda")
+        self.grad_scaler = GradScaler(self._amp_device_type, enabled=self._amp_enabled)
 
     @classmethod
     def from_env(cls, cfg: PPOConfig, env, device: str):
@@ -328,7 +309,48 @@ class PPOPolicy(TensorDictModuleBase):
         return policy
     
     def on_stage_start(self, stage: str, env: "_EnvBase"):
-        pass
+        if stage not in ("train", ""):
+            return
+        if active_adaptation.is_distributed():
+            active_adaptation.bind_local_rank_device()
+            if self.cfg.use_ddp:
+                local_idx = active_adaptation.get_local_cuda_index()
+                self.actor = DDP(self.actor, device_ids=[local_idx])
+                self.critic = DDP(self.critic, device_ids=[local_idx], static_graph=True)
+            else:
+                for param in self.actor.parameters():
+                    distr.broadcast(param, src=0)
+                for param in self.critic.parameters():
+                    distr.broadcast(param, src=0)
+        self.should_reduce_grads = (
+            active_adaptation.is_distributed() and not self.cfg.use_ddp
+        )
+        self.world_size = active_adaptation.get_world_size()
+
+        if self.cfg.muon:
+            self.opt = MuonAdamWWrapper(
+                [self.actor, self.critic],
+                lr=self.cfg.lr,
+                weight_decay=0.01,
+            )
+        else:
+            self.opt = torch.optim.AdamW(
+                [
+                    {"params": self.actor.parameters()},
+                    {"params": self.critic.parameters()},
+                ],
+                lr=self.cfg.lr,
+                weight_decay=0.01,
+            )
+
+    def _autocast(self):
+        if not self._amp_enabled:
+            return nullcontext()
+        return autocast(device_type=self._amp_device_type, dtype=torch.float16)
+
+    def _set_lr(self, lr: float) -> None:
+        for group in self.opt.param_groups:
+            group["lr"] = lr
 
     @VecNorm.freeze()
     def train_op(self, tensordict: TensorDict):
@@ -347,50 +369,63 @@ class PPOPolicy(TensorDictModuleBase):
             self._compute_advantage(tensordict, self.critic, "adv", "ret")
             tensordict["adv"] = normalize(tensordict["adv"], subtract_mean=True)
 
+        kl = None
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
+            epoch_kls = []
             for minibatch in batch:
-                infos.append(TensorDict(self.update_batch(minibatch), []))
+                info = self.update_batch(minibatch)
+                infos.append(TensorDict(info, []))
+                if self.desired_kl is not None:
+                    epoch_kls.append(info["actor/kl"])
 
-                if self.desired_kl is not None: # adaptive learning rate
-                    kl = infos[-1]["actor/kl"]
-                    actor_lr = self.opt.param_groups[0]["lr"]
-                    if kl > self.desired_kl * 2.0:
-                        actor_lr = max(1e-5, actor_lr / 1.5)
-                    elif kl < self.desired_kl / 2.0 and kl > 0.0:
-                        actor_lr = min(self.init_lr, actor_lr * 1.1)
-                    self.opt.param_groups[0]["lr"] = actor_lr
+            # Adaptive LR once per epoch from mean minibatch KL, all-reduced so
+            # every rank shares the same global KL (local minibatch KL diverges).
+            if self.desired_kl is not None and epoch_kls:
+                kl = sum(epoch_kls) / len(epoch_kls)
+                if active_adaptation.is_distributed():
+                    distr.all_reduce(kl, op=distr.ReduceOp.SUM)
+                    kl = kl / self.world_size
+                actor_lr = self.opt.param_groups[0]["lr"]
+                if kl > self.desired_kl * 2.0:
+                    actor_lr = max(1e-5, actor_lr / 1.5)
+                elif kl < self.desired_kl / 2.0 and kl > 0.0:
+                    actor_lr = min(self.init_lr, actor_lr * 1.1)
+                self._set_lr(actor_lr)
         
-        with torch.no_grad(), torch.device(self.device):
-            # check the difference between the output with and without the mask
-            # this is used to check if CNN is working properly
-            # if the difference is small, then CNN is NOT working properly
-            self.vecnorm(tensordict)
-            a = self.critic(tensordict.replace(mask=torch.zeros(*tensordict.shape, 1)))
-            b = self.critic(tensordict.replace(mask=torch.ones(*tensordict.shape, 1)))
-            value_diff = F.mse_loss(a["state_value"], b["state_value"])
-            critic_feature_norm = b["_critic_feature"].norm(dim=-1, keepdim=True).mean()
-            a = self.actor(
-                tensordict.replace(mask=torch.zeros(*tensordict.shape, 1)))
-            b = self.actor(
-                tensordict.replace(mask=torch.ones(*tensordict.shape, 1)))
-            policy_diff = F.mse_loss(a["loc"], b["loc"])
-            actor_feature_norm = b["_actor_feature"].norm(dim=-1, keepdim=True).mean()
+        # with torch.no_grad(), torch.device(self.device):
+        #     # check the difference between the output with and without the mask
+        #     # this is used to check if CNN is working properly
+        #     # if the difference is small, then CNN is NOT working properly
+        #     self.vecnorm(tensordict)
+        #     a = self.critic(tensordict.replace(mask=torch.zeros(*tensordict.shape, 1)))
+        #     b = self.critic(tensordict.replace(mask=torch.ones(*tensordict.shape, 1)))
+        #     value_diff = F.mse_loss(a["state_value"], b["state_value"])
+        #     critic_feature_norm = b["_critic_feature"].norm(dim=-1, keepdim=True).mean()
+        #     a = self.actor(
+        #         tensordict.replace(mask=torch.zeros(*tensordict.shape, 1)))
+        #     b = self.actor(
+        #         tensordict.replace(mask=torch.ones(*tensordict.shape, 1)))
+        #     policy_diff = F.mse_loss(a["loc"], b["loc"])
+        #     actor_feature_norm = b["_actor_feature"].norm(dim=-1, keepdim=True).mean()
 
         out = {}
         for k, v in torch.stack(infos).items():
             out[k] = v.detach().mean().item()
-        out["actor/feature_norm"] = actor_feature_norm.item()
-        out["actor/policy_diff"] = policy_diff.item()
-        out["actor/kl"] = kl.item()
+        # out["actor/feature_norm"] = actor_feature_norm.item()
+        # out["actor/policy_diff"] = policy_diff.item()
+        if kl is not None:
+            out["actor/kl"] = kl.item() if torch.is_tensor(kl) else float(kl)
         out["actor/lr"] = self.opt.param_groups[0]["lr"]
+        if self._amp_enabled:
+            out["amp/scale"] = float(self.grad_scaler.get_scale())
 
         out["critic/value_mean"] = tensordict["ret"].mean().item()
         out["critic/value_std"] = tensordict["ret"].std().item()
         neg_rew = self._flatten_rewards(tensordict[REWARD_KEY], clamp_min=None)
         out["critic/neg_rew_ratio"] = (neg_rew.sum(-1) <= 0.).float().mean().item()
-        out["critic/feature_norm"] = critic_feature_norm.item()
-        out["critic/value_diff"] = value_diff.item()
+        # out["critic/feature_norm"] = critic_feature_norm.item()
+        # out["critic/value_diff"] = value_diff.item()
         if active_adaptation.is_distributed():
             self.vecnorm.module.synchronize(mode="broadcast")
         return sorted(out.items())
@@ -424,6 +459,9 @@ class PPOPolicy(TensorDictModuleBase):
         keys = tensordict.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
             with tensordict.view(-1) as tensordict_flat:
+                # Critic reads ``_obs_normed``; normalize before value bootstrap.
+                self.vecnorm(tensordict_flat)
+                self.vecnorm(tensordict_flat["next"])
                 critic(tensordict_flat)
                 critic(tensordict_flat["next"])
 
@@ -459,58 +497,74 @@ class PPOPolicy(TensorDictModuleBase):
         symmetry["ret"] = tensordict["ret"]
         tensordict = torch.cat([tensordict.select(*symmetry.keys(True, True)), symmetry], dim=0)
 
-        self.vecnorm(tensordict)
-        action_data = tensordict[ACTION_KEY]
-        log_probs_data = tensordict["action_log_prob"]
-        self.actor(tensordict)
-        dist = IndependentNormal(tensordict["loc"], tensordict["scale"])
-        log_probs = dist.log_prob(action_data)
-        entropy = dist.entropy().mean()
+        with self._autocast():
+            self.vecnorm(tensordict)
+            action_data = tensordict[ACTION_KEY]
+            log_probs_data = tensordict["action_log_prob"]
+            self.actor(tensordict)
+            dist = IndependentNormal(tensordict["loc"], tensordict["scale"])
+            log_probs = dist.log_prob(action_data)
+            entropy = dist.entropy().mean()
 
-        adv = tensordict["adv"]
-        log_ratio = (log_probs - log_probs_data).unsqueeze(-1)
-        ratio = torch.exp(log_ratio)
-        surr1 = adv * ratio
-        surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
-        policy_loss = - torch.mean(torch.min(surr1, surr2) * (~tensordict["is_init"]))
-        entropy_loss = - self.entropy_coef * entropy
+            adv = tensordict["adv"]
+            log_ratio = (log_probs - log_probs_data).unsqueeze(-1)
+            ratio = torch.exp(log_ratio)
+            surr1 = adv * ratio
+            surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
+            policy_loss = - torch.mean(torch.min(surr1, surr2) * (~tensordict["is_init"]))
+            entropy_loss = - self.entropy_coef * entropy
 
-        b_returns = tensordict["ret"]
-        values = self.critic(tensordict)["state_value"]
-        assert values.shape == b_returns.shape
-        value_loss = self.critic_loss_fn(b_returns, values)
-        value_loss = (value_loss * (~tensordict["is_init"])).mean()
-        
-        loss = policy_loss + entropy_loss + value_loss
-        self.opt.zero_grad()
-        loss.backward()
+            b_returns = tensordict["ret"]
+            values = self.critic(tensordict)["state_value"]
+            assert values.shape == b_returns.shape
+            value_loss = self.critic_loss_fn(b_returns, values)
+            value_loss = (value_loss * (~tensordict["is_init"])).mean()
+            
+            loss = policy_loss + entropy_loss + value_loss
 
-        if active_adaptation.is_distributed() and not self.cfg.use_ddp:
+        self.opt.zero_grad(set_to_none=True)
+        if self._amp_enabled:
+            self.grad_scaler.scale(loss).backward()
+            # Unscale before all-reduce / clip so norms are on physical grads.
+            self.grad_scaler.unscale_(self.opt)
+        else:
+            loss.backward()
+
+        if self.should_reduce_grads:
             for param in self.actor.parameters():
-                distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
-                param.grad /= self.world_size
+                if param.grad is not None:
+                    distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
+                    param.grad /= self.world_size
             for param in self.critic.parameters():
-                distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
-                param.grad /= self.world_size
+                if param.grad is not None:
+                    distr.all_reduce(param.grad, op=distr.ReduceOp.SUM)
+                    param.grad /= self.world_size
         
         actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        self.opt.step()
+        if self._amp_enabled:
+            self.grad_scaler.step(self.opt)
+            self.grad_scaler.update()
+        else:
+            self.opt.step()
         
         with torch.no_grad():
-            explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
-            clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
-            symmetry_loss = F.mse_loss(dist.mean[bsize:], self.act_transform(dist.mean[:bsize]))
-            loc, scale = dist.loc[:bsize], dist.scale[:bsize]
+            explained_var = 1 - F.mse_loss(values.float(), b_returns.float()) / b_returns.float().var()
+            clipfrac = ((ratio.float() - 1.0).abs() > self.clip_param).float().mean()
+            symmetry_loss = F.mse_loss(
+                dist.mean[bsize:].float(),
+                self.act_transform(dist.mean[:bsize].float()),
+            )
+            loc, scale = dist.loc[:bsize].float(), dist.scale[:bsize].float()
             kl = IndependentNormal.kl(loc_old, scale_old, loc, scale).mean()
         return {
-            "actor/policy_loss": policy_loss.detach(),
-            "actor/entropy": entropy.detach(),
+            "actor/policy_loss": policy_loss.detach().float(),
+            "actor/entropy": entropy.detach().float(),
             "actor/grad_norm": actor_grad_norm,
             "actor/clamp_ratio": clipfrac,
             "actor/symmetry_loss": symmetry_loss.detach(),
             "actor/kl": kl,
-            "critic/value_loss": value_loss.detach(),
+            "critic/value_loss": value_loss.detach().float(),
             "critic/grad_norm": critic_grad_norm,
             "critic/explained_var": explained_var,
         }
