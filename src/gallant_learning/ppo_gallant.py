@@ -59,7 +59,7 @@ from active_adaptation.utils.torchrl import EnsembleCritic
 
 @dataclass
 class PPOConfig:
-    _target_: str = f"{__package__}.ppo_gallant.PPOPolicy"
+    _target_: str = f"{__package__}.ppo_gallant.PPOConfig"
     name: str = "ppo_gallant"
     train_every: int = 48
     ppo_epochs: int = 4
@@ -77,7 +77,10 @@ class PPOConfig:
     use_ddp: bool = True
 
     store_transitions: bool = False
-    in_keys: Tuple[str] = (OBS_KEY, "height_scan", "grid_map_", "base_height")
+    in_keys: Tuple[str] = (OBS_KEY, "grid_map_")
+
+    def get_class(self):
+        return PPOPolicy
 
 cs = ConfigStore.instance()
 cs.store("ppo_gallant_concat", node=PPOConfig(encoder_type="concat"), group="algo")
@@ -189,7 +192,7 @@ class PPOPolicy(TensorDictModuleBase):
         env,
     ):
         super().__init__()
-        self.cfg = PPOConfig(**cfg)
+        self.cfg = cfg if isinstance(cfg, PPOConfig) else PPOConfig(**cfg)
         self.device = device
         self.observation_spec = observation_spec
 
@@ -216,8 +219,8 @@ class PPOPolicy(TensorDictModuleBase):
         else:
             self.terrain_key = "grid_map_"
         
-        self.obs_transform = env.observation_funcs[OBS_KEY].symmetry_transform().to(self.device)
-        self.hsc_transform = env.observation_funcs[self.terrain_key].symmetry_transform().to(self.device)
+        self.obs_transform = env.observation_groups[OBS_KEY].symmetry_transform().to(self.device)
+        self.hsc_transform = env.observation_groups[self.terrain_key].symmetry_transform().to(self.device)
         self.act_transform = env.action_manager.symmetry_transform().to(self.device)
         
         self.vecnorm = Mod(VecNorm(observation_spec[OBS_KEY].shape[-1:], decay=1.0), [OBS_KEY], ["_obs_normed"]).to(self.device)
@@ -225,7 +228,7 @@ class PPOPolicy(TensorDictModuleBase):
         EncoderClass = {
             "attn": EncoderAttn,
             "concat": EncoderConcat,
-        }[cfg.encoder_type]
+        }[self.cfg.encoder_type]
 
         actor_module = Seq(
             Mod(EncoderClass(conv3d=False), ["_obs_normed", self.terrain_key, "mask"], ["_actor_feature"]),
@@ -283,12 +286,12 @@ class PPOPolicy(TensorDictModuleBase):
             muon = torch.optim.Muon([
                 {"params": [p for p in self.actor.parameters() if is_matrix_shaped(p)]},
                 {"params": [p for p in self.critic.parameters() if is_matrix_shaped(p)]},
-            ], lr=cfg.lr, adjust_lr_fn="match_rms_adamw", weight_decay=0.01)
+            ], lr=self.cfg.lr, adjust_lr_fn="match_rms_adamw", weight_decay=0.01)
 
             adamw = torch.optim.AdamW([
                 {"params": [p for p in self.actor.parameters() if not is_matrix_shaped(p)]},
                 {"params": [p for p in self.critic.parameters() if not is_matrix_shaped(p)]},
-            ], lr=cfg.lr, weight_decay=0.01)
+            ], lr=self.cfg.lr, weight_decay=0.01)
             self.opt = OptimizerGroup([muon, adamw])
         else:
             self.opt = torch.optim.AdamW(
@@ -296,9 +299,20 @@ class PPOPolicy(TensorDictModuleBase):
                     {"params": self.actor.parameters()},
                     {"params": self.critic.parameters()},
                 ],
-                lr=cfg.lr,
+                lr=self.cfg.lr,
                 weight_decay=0.01
             )
+
+    @classmethod
+    def from_env(cls, cfg: PPOConfig, env, device: str):
+        return cls(
+            cfg=cfg,
+            observation_spec=env.observation_spec,
+            action_spec=env.action_spec,
+            reward_spec=env.reward_spec,
+            device=device,
+            env=env,
+        )
     
     def get_rollout_policy(self, mode: str="train", critic: bool = False):
         if critic:

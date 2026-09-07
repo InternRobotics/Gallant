@@ -1,10 +1,10 @@
+from __future__ import annotations
+
 import torch
+from typing_extensions import override
+
 from active_adaptation.envs.mdp.terminations import Termination
-from typing import TYPE_CHECKING
-
-
-if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
+from active_adaptation.envs.utils import find_bodies
 
 from gallant.command import LocoNavigation
 
@@ -12,12 +12,17 @@ from gallant.command import LocoNavigation
 class feet_too_close(Termination):
     namespace = "gallant"
 
-    def __init__(self, env, body_names: str, thres: float = 0.06):
-        super().__init__(env)
+    def __init__(self, body_names: str, thres: float = 0.06):
+        super().__init__()
+        self.body_names = body_names
         self.threshold = thres
-        self.asset: Articulation = self.env.scene.articulations["robot"]
-        self.body_ids = self.asset.find_bodies(body_names)[0]
-        self.body_ids = torch.tensor(self.body_ids, device=self.env.device)
+
+    @override
+    def _initialize(self, env):
+        super()._initialize(env)
+        self.asset = self.env.scene.articulations["robot"]
+        body_ids, _ = find_bodies(self.asset, self.body_names)
+        self.body_ids = torch.tensor(body_ids, device=self.device)
         assert len(self.body_ids) == 2, "Only support two bodies"
 
     def compute(self, termination: torch.Tensor):
@@ -29,12 +34,17 @@ class feet_too_close(Termination):
 class pillar_fall(Termination[LocoNavigation]):
     namespace = "gallant"
 
-    def __init__(self, env, body_names: str, threshold: float = -0.05):
-        super().__init__(env)
-        self.threshold = threshold
-        self.asset: Articulation = self.env.scene.articulations["robot"]
+    def __init__(self, body_names: str, threshold: float = -0.05):
+        super().__init__()
         self.body_names = body_names
-        self.body_ids = self.asset.find_bodies(body_names)[0]
+        self.threshold = threshold
+
+    @override
+    def _initialize(self, env):
+        super()._initialize(env)
+        self.asset = self.env.scene.articulations["robot"]
+        body_ids, _ = find_bodies(self.asset, self.body_names)
+        self.body_ids = body_ids
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         con1 = self.command_manager.raw_terrain_types == 5
@@ -47,10 +57,14 @@ class pillar_fall(Termination[LocoNavigation]):
 class no_moving(Termination[LocoNavigation]):
     namespace = "gallant"
 
-    def __init__(self, env, thres: float = 0.01):
-        super().__init__(env)
+    def __init__(self, thres: float = 0.01):
+        super().__init__()
         self.thres = thres
-        self.asset: Articulation = self.env.scene.articulations["robot"]
+
+    @override
+    def _initialize(self, env):
+        super()._initialize(env)
+        self.asset = self.env.scene.articulations["robot"]
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         root_pos_w = self.asset.data.root_pos_w

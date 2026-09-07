@@ -1099,21 +1099,5 @@ ROUGH_TERRAIN_BASE_CFG = TerrainImporterCfg(
     debug_vis=False,
 )
 
-TERRAIN_USD_CFG = TerrainImporterCfg(
-    prim_path="/World/ground",
-    terrain_type="usd",
-    usd_path="/home/btx0424/lab50/benchmark.usda",
-    collision_group=-1,
-    physics_material=sim_utils.RigidBodyMaterialCfg(
-        friction_combine_mode="multiply",
-        restitution_combine_mode="multiply",
-        static_friction=1.0,
-        dynamic_friction=1.0,
-        restitution=1.0,
-    ),
-    debug_vis=False,
-)
-
 registry.register("terrain", "hussar_3d", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=NEW_ROUGH_TERRAINS_CFG))
 registry.register("terrain", "hussar_vis", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=VIS_CFG))
-registry.register("terrain", "hussar_test", TERRAIN_USD_CFG)

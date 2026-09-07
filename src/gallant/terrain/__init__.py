@@ -1,9 +1,10 @@
+"""Gallant terrains — Isaac Lab only."""
 import active_adaptation
-from pathlib import Path
 
-if active_adaptation.get_backend() == "isaac":
-    from . import hussar_terrain
+if active_adaptation.get_backend() == "isaaclab":
+    from . import hussar_terrain  # noqa: F401 — registers hussar_* terrains
 else:
-    from active_adaptation.envs.terrain import TERRAINS_MUJOCO, MjTerrainCfg
-    path = Path(__file__).parent / "ground.xml"
-    TERRAINS_MUJOCO["hussar_3d"] = MjTerrainCfg(mjcf_path=str(path))
+    raise ImportError(
+        "Gallant terrains require backend='isaaclab' "
+        f"(got {active_adaptation.get_backend()!r})."
+    )

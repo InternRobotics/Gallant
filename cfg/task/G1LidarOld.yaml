@@ -1,5 +1,7 @@
 # @package task
+project: gallant
 name: G1HUSSAR
+env_class: GallantEnvIsaac
 
 viewer:
   resolution: [1280, 720]
@@ -13,28 +15,30 @@ terrain: hussar_3d
 # common
 num_envs: 4
 max_episode_length: 400
+allocate_time: 10
 
 sim:
   step_dt: 0.02
   isaac_physics_dt: 0.005
   mujoco_physics_dt: 0.002
 
-action:
-  _target_: active_adaptation.envs.mdp.action.JointPosition
-  action_scaling: 
-    .*elbow_joint: 0.25
-    .*shoulder.*: 0.25
-    .*hip.*: 0.25
-    .*knee.*: 0.25
-    waist_yaw_joint: 0.25
-    waist_roll_joint: 0.25
-    waist_pitch_joint: 0.25
-    .*ankle.*: 0.25
-  max_delay: 1
-  alpha: [0.8, 1.0]
+input:
+  action:
+    _target_: JointPosition
+    action_scaling: 
+      .*elbow_joint: 0.25
+      .*shoulder.*: 0.25
+      .*hip.*: 0.25
+      .*knee.*: 0.25
+      waist_yaw_joint: 0.25
+      waist_roll_joint: 0.25
+      waist_pitch_joint: 0.25
+      .*ankle.*: 0.25
+    max_delay: 1
+    alpha_range: [0.8, 1.0]
 
 command:
-  class: LocoNavigation
+  _target_: LocoNavigation
   feet_names: .*ankle_roll_link
   pelvis_names: .*pelvis.*
   robot_name: G1
@@ -44,12 +48,12 @@ command:
 observation:
   # command:
   policy:
-    command:
+    command: {}
     root_angvel_b:  {noise_std: 0.05}
     gravity_multistep: {steps: 3, noise_std: 0.05}
     joint_pos_multistep: {steps: 3, noise_std: 0.05}
     joint_vel_multistep: {steps: 3, noise_std: 0.2}
-    prev_actions: {steps: 3, permute: true}
+    prev_actions: {steps: 3}
   priv:
     root_linvel_b:    {}
     feet_pos_b:       {feet_names: .*ankle_roll_link}

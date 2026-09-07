@@ -15,6 +15,10 @@ from active_adaptation.utils.math import (
 from isaaclab.utils.warp import raycast_mesh
 
 import warp as wp
+from typing_extensions import override
+from tensordict import TensorDictBase
+
+from active_adaptation.envs.env_base import _EnvBase
 
 wp.init()
 
@@ -127,9 +131,12 @@ TEST_TERRAIN_ORIGINS = [
 
 
 class LocoNavigation(Command):
+    """Isaac Lab navigation command for Gallant (hussar curriculum + lidar tasks)."""
+
+    supported_backends = ("isaaclab",)
+
     def __init__(
         self,
-        env,
         feet_names: str,
         pelvis_names: str,
         robot_name: str,
@@ -140,29 +147,37 @@ class LocoNavigation(Command):
         stand_prob: float = 0.05,
         reach_distance_thres: float = 0.2
     ):
-        super().__init__(env)
+        super().__init__()
         self.feet_names = feet_names
-        self.use_curriculum = (
-            use_curriculum
-            and self.env.backend == "isaac"
-            and self.env.training
-        )
-        self.resample_interval = int(self.env.cfg.allocate_time / self.env.step_dt)
-        self.resample_distance_thres = reach_distance_thres
+        self.pelvis_names = pelvis_names
+        self.robot_name = robot_name
+        self.max_target_height = max_target_height
+        self._use_curriculum = use_curriculum
+        self.offset = offset
         self.random_command = random_command
         self.stand_prob = stand_prob
+        self.reach_distance_thres = reach_distance_thres
+
+    @override
+    def _initialize(self, env: _EnvBase) -> None:
+        super()._initialize(env)
+        self.use_curriculum = self._use_curriculum and self.env.training
+        self.resample_interval = int(self.env.cfg.allocate_time / self.env.step_dt)
+        self.resample_distance_thres = self.reach_distance_thres
         self.allocate_time = self.env.cfg.allocate_time
         self.curri_delay_ratio = 0.0
-        if self.env.backend == "isaac":
-            from active_adaptation.envs.terrain import BetterTerrainImporter, BetterTerrainGenerator
-            self.terrain_importer: BetterTerrainImporter = self.env.scene.terrain
-            self.terrain_generator: BetterTerrainGenerator = self.terrain_importer.terrain_generator
 
-            if self.use_curriculum and self.terrain_importer.cfg.terrain_type == "generator":
-                assert self.terrain_generator.cfg.curriculum, "Curriculum must be enabled in the terrain generator."
-            if self.terrain_importer.cfg.terrain_type == "usd":
-                self._origins = torch.tensor(TEST_TERRAIN_ORIGINS, device=self.device)
-                self._test_target = torch.zeros(self.num_envs, 3, device=self.device) # will be sampled from _origins
+        from active_adaptation.envs.terrain import BetterTerrainImporter, BetterTerrainGenerator
+        self.terrain_importer: BetterTerrainImporter = self.env.scene.terrain
+        self.terrain_generator: BetterTerrainGenerator = self.terrain_importer.terrain_generator
+
+        if self.use_curriculum and self.terrain_importer.cfg.terrain_type == "generator":
+            assert self.terrain_generator.cfg.curriculum, "Curriculum must be enabled in the terrain generator."
+        if self.terrain_importer.cfg.terrain_type == "usd":
+            self._origins = torch.tensor(TEST_TERRAIN_ORIGINS, device=self.device)
+            self._test_target = torch.zeros(self.num_envs, 3, device=self.device)  # sampled from _origins
+        else:
+            self._origins = self.terrain_importer.env_origins.clone()
 
         with torch.device(self.device):
             self.target_reached = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -174,7 +189,7 @@ class LocoNavigation(Command):
             self.origin_pos_w = torch.zeros(self.num_envs, 3)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
 
-        if self.env.sim.has_gui() and self.env.backend == "isaac":
+        if self.env.sim.has_gui():
             from isaaclab.markers import FRAME_MARKER_CFG, VisualizationMarkers
             self.frame_marker = VisualizationMarkers(
                 FRAME_MARKER_CFG.replace(
@@ -182,14 +197,10 @@ class LocoNavigation(Command):
                 )
             )
             self.frame_marker.set_visibility(True)
-        elif self.env.backend == "mujoco":
-            self.target_marker = self.env.scene.create_sphere_marker(radius=0.05, rgba=(0., 0., 1., 1.))
         # preset values for acceleration
-        self.contact_foot_ids = self.env.scene.sensors["contact_forces"].find_bodies(feet_names)[0]
-        self.foot_ids = self.asset.find_bodies(feet_names)[0]
-        self.body_pelvis_id = self.asset.find_bodies(pelvis_names)[0]
-        self.robot_name = robot_name
-        self.max_target_height = max_target_height
+        self.contact_foot_ids = self.env.scene.sensors["contact_forces"].find_bodies(self.feet_names)[0]
+        self.foot_ids = self.asset.find_bodies(self.feet_names)[0]
+        self.body_pelvis_id = self.asset.find_bodies(self.pelvis_names)[0]
         self.knee_joint_ids = self.asset.find_joints(".*knee.*")[0]
         self.knee_action_min = self.asset.data.joint_pos_limits[:, self.knee_joint_ids, 0]
         self.knee_action_max = self.asset.data.joint_pos_limits[:, self.knee_joint_ids, 1]
@@ -210,23 +221,22 @@ class LocoNavigation(Command):
             [ 0.5,  0.0, 0.0],
             [ 0.5,  0.5, 0.0],
         ], device=self.device).repeat(self.num_envs, 1, 1).reshape(self.num_envs * 9, -1)  # shape: [9, 3]
-        
+
         self.torso_id = self.asset.find_bodies("torso_link")[0]
-        self.head_offset = offset
+        self.head_offset = self.offset
         self.terrain_types = torch.zeros((self.num_envs, 3), dtype=torch.long, device=self.device)
         self.raw_terrain_types = torch.zeros((self.num_envs), dtype=torch.int, device=self.device)
         self.move_mask = torch.zeros((self.num_envs, 1), dtype=torch.bool, device=self.device)
         self.has_tree = False
         self.seed = wp.rand_init(0 + active_adaptation.get_local_rank())
 
-        if self.env.backend == "isaac":
-            from .terrain.hussar_terrain import TREE_INFOS
-            if len(TREE_INFOS) > 0:
-                self.has_tree = True
-                self.grid = wp.HashGrid(512, 1024, 4, device=wp.get_device(str(self.device)))
-                self.wp_tree = wp.from_torch(torch.tensor(TREE_INFOS, device=self.device, dtype=torch.float32), dtype=wp.vec3)
-                self.grid.build(self.wp_tree, radius=1.5)
-        self.update()
+        from .terrain.hussar_terrain import TREE_INFOS
+        if len(TREE_INFOS) > 0:
+            self.has_tree = True
+            self.grid = wp.HashGrid(512, 1024, 4, device=wp.get_device(str(self.device)))
+            self.wp_tree = wp.from_torch(torch.tensor(TREE_INFOS, device=self.device, dtype=torch.float32), dtype=wp.vec3)
+            self.grid.build(self.wp_tree, radius=1.5)
+        self._update()
         self.last_pos = torch.zeros(self.num_envs, 2, device=self.device)
 
 
@@ -319,12 +329,62 @@ class LocoNavigation(Command):
             signs=torch.tensor([1, -1, 1, 1])
         )
 
-    def reset(self, env_ids: torch.Tensor):
+    @override
+    def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
+        if self.use_curriculum and self.env.episode_count > 1 and self.env.training:
+            move_up = (self.env.stats['loco']['reaching_target'] > 2.0).reshape(self.num_envs)[env_ids]
+            move_down = (self.env.stats['loco']['reaching_target'] < 1.0).reshape(self.num_envs)[env_ids]
+            self.terrain_importer.update_env_origins(env_ids, move_up, move_down)
+            self._origins = self.terrain_importer.env_origins.clone()
+            self.env.extra["curriculum/terrain_level"] = self.terrain_importer.terrain_levels.float().mean()
+        self.env.extra["curriculum/curri_delay_ratio"] = self.curri_delay_ratio
+
+        init_root_state = self.init_root_state[env_ids].clone()
+
+        if self.terrain_importer.cfg.terrain_type == "plane":
+            origins = self.env.scene.env_origins[env_ids]
+        elif self.terrain_importer.cfg.terrain_type == "generator":
+            idx = torch.randint(0, len(self._origins), (len(env_ids),), device=self.device)
+            origins = self._origins[idx]
+        elif self.terrain_importer.cfg.terrain_type == "usd":
+            idx = torch.multinomial(torch.ones(len(self._origins), device=self.device).expand(len(env_ids), -1), 2, replacement=False)
+            origins = self._origins[idx[:, 0]]
+            self._test_target[env_ids] = self._origins[idx[:, 1]]
+        else:
+            raise ValueError(f"Unsupported terrain type: {self.terrain.cfg.terrain_type}")
+
+        if self.terrain_importer.cfg.terrain_type == "generator":
+            num_cols, num_rows = self.terrain_generator.cfg.num_cols, self.terrain_generator.cfg.num_rows
+            sub_terrain_size = self.terrain_generator.cfg.size[0]
+            sub_terrain_types = self.terrain_generator.sub_terrain_types.reshape(num_rows, num_cols).clone().to(self.device)
+            env_x = (torch.floor(origins[:, 0] / sub_terrain_size) + num_rows // 2).to(torch.long)
+            env_y = (torch.floor(origins[:, 1] / sub_terrain_size) + num_cols // 2).to(torch.long)
+            self.raw_terrain_types[env_ids] = sub_terrain_types[env_x, env_y]
+            self.terrain_types[env_ids, :] = (self.raw_terrain_types[env_ids].unsqueeze(-1) >> torch.arange(2, -1, -1).to(self.device)) & 1
+
+        orientations = quat_mul(
+            init_root_state[:, 3:7],
+            sample_quat_yaw(len(env_ids), device=self.device)
+        )
+
+        init_root_state[:, :3] += origins
+        init_root_state[:, 3:7] = orientations
+        self.origin_pos_w[env_ids] = origins
+        self._write_initial_states({"robot": init_root_state}, env_ids)
+        entity = self.env.scene["robot"]
+        entity.write_joint_state_to_sim(
+            self.init_joint_pos[env_ids],
+            self.init_joint_vel[env_ids],
+            env_ids=env_ids,
+        )
+
         self.time_alloted[env_ids] = self.resample_interval / 50.
         self.time_elapsed[env_ids] = 0.
         self.sample_target(env_ids)
+        return origins
 
-    def update(self):
+    @override
+    def _update(self) -> None:
         resample = (self.time_elapsed >= (self.resample_interval / 50.))
         self.target_pos_w = torch.where(resample, self.origin_pos_w, self.target_pos_w)
         self.target_reached = torch.where(resample, 0, self.target_reached)
@@ -357,66 +417,12 @@ class LocoNavigation(Command):
         )
         self.head_height = (head_position[:, 2] - self.env.get_ground_height_at(head_position)).reshape(self.num_envs, 1)
 
-    def sample_init(self, env_ids):
-        
-        if self.use_curriculum and self.env.episode_count > 1 and self.env.training:
-            # time_remaining = (self.env.max_episode_length - self.env.episode_length_buf[env_ids, None]) * self.env.step_dt
-            # distance_commanded = (self.distance_commanded[env_ids] + self.command_speed[env_ids] * time_remaining)
-            move_up = (self.env.stats['loco']['reaching_target'] > 2.0).reshape(self.num_envs)[env_ids]
-            move_down = (self.env.stats['loco']['reaching_target'] < 1.0).reshape(self.num_envs)[env_ids]
-            # move_up = move_up & ~move_down
-            self.terrain_importer.update_env_origins(env_ids, move_up, move_down)
-            self._origins = self.terrain_importer.env_origins.clone()
-            self.env.extra["curriculum/terrain_level"] = self.terrain_importer.terrain_levels.float().mean()
-        self.env.extra["curriculum/curri_delay_ratio"] = self.curri_delay_ratio
-
-        init_root_state = self.init_root_state[env_ids]
-
-        if self.env.backend == "isaac":
-            if self.terrain_importer.cfg.terrain_type == "plane":
-                origins = self.env.scene.env_origins[env_ids]
-            elif self.terrain_importer.cfg.terrain_type == "generator": # generator
-                idx = torch.randint(0, len(self._origins), (len(env_ids),), device=self.device)
-                origins = self._origins[idx]
-            elif self.terrain_importer.cfg.terrain_type == "usd":
-                idx = torch.multinomial(torch.ones(len(self._origins), device=self.device).expand(len(env_ids), -1), 2, replacement=False)
-                origins = self._origins[idx[:, 0]]
-                self._test_target[env_ids] = self._origins[idx[:, 1]]
-            else:
-                raise ValueError(f"Unsupported terrain type: {self.terrain.cfg.terrain_type}")
-            
-            if self.terrain_importer.cfg.terrain_type == "generator":# and self.env.training:
-                num_cols, num_rows = self.terrain_generator.cfg.num_cols, self.terrain_generator.cfg.num_rows
-                sub_terrain_size = self.terrain_generator.cfg.size[0]
-                sub_terrain_types = self.terrain_generator.sub_terrain_types.reshape(num_rows, num_cols).clone().to(self.device)
-                env_x = (torch.floor(origins[:, 0] / sub_terrain_size) + num_rows // 2).to(torch.long)
-                env_y = (torch.floor(origins[:, 1] / sub_terrain_size) + num_cols // 2).to(torch.long)
-                self.raw_terrain_types[env_ids] = sub_terrain_types[env_x, env_y]
-                self.terrain_types[env_ids, :] = (self.raw_terrain_types[env_ids].unsqueeze(-1) >> torch.arange(2, -1, -1).to(self.device)) & 1
-            
-            orientations = quat_mul(
-                init_root_state[:, 3:7],
-                sample_quat_yaw(len(env_ids), device=self.device)
-            )
-        
-        elif self.env.backend == "mujoco":
-            origins = torch.zeros(len(env_ids), 3, device=self.device)
-            orientations = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(len(env_ids), 4)
-        
-        init_root_state[:, :3] += origins
-        init_root_state[:, 3:7] = orientations
-        self.origin_pos_w[env_ids] = origins
-        return init_root_state
-
     def mask2id(self, mask: torch.Tensor):
         return mask.nonzero().squeeze(-1)
     
     def sample_target(self, env_ids: torch.Tensor):
-        if self.env.backend == "isaac" and self.terrain_importer.cfg.terrain_type == "usd":
+        if self.terrain_importer.cfg.terrain_type == "usd":
             self.target_pos_w[env_ids] = self._test_target[env_ids]
-            return
-        if self.env.backend == "mujoco":
-            self.target_pos_w[env_ids] = torch.tensor([4.5, 0.0, 1.0], device=self.device)
             return
         wp.launch(
             sample_target_kernel,
@@ -433,32 +439,24 @@ class LocoNavigation(Command):
         self.seed = wp.rand_init(int(self.seed))
         self.target_reached[env_ids] = 0
     
-    def debug_draw(self):
+    @override
+    def debug_draw(self) -> None:
         # self.env.sim.set_camera_view(
         #     self.asset.data.root_pos_w[0].cpu() + torch.tensor([2., 2., 1.]),
         #     self.asset.data.root_pos_w[0].cpu()
         # )
-        if self.env.backend == "isaac":
-            # pelvis axis
-            quat = self.asset.data.root_quat_w
-            scales = torch.tensor([0.2, 0.2, 0.2]).expand(len(self.asset.data.root_pos_w), 3)
-            # self.frame_marker.visualize(self.asset.data.root_pos_w, quat, scales=scales)
-            
-            diff = self.target_pos_w - self.asset.data.root_pos_w
-            diff[:, 2] = 0.0
-            # line from current position to target position
-            self.env.debug_draw.vector(
-                self.asset.data.root_pos_w,
-                diff,
-                color=(1, 0, 0, 1)
-            )
-            self.env.debug_draw.vector(
-                self.asset.data.root_pos_w,
-                self.target_direction,
-                color=(0, 1, 0, 1)
-            )
-        elif self.env.backend == "mujoco":
-            self.target_marker.geom.pos = self.target_pos_w[0]
+        diff = self.target_pos_w - self.asset.data.root_pos_w
+        diff[:, 2] = 0.0
+        self.env.scene.draw_vector(
+            self.asset.data.root_pos_w,
+            diff,
+            color=(1, 0, 0, 1)
+        )
+        self.env.scene.draw_vector(
+            self.asset.data.root_pos_w,
+            self.target_direction,
+            color=(0, 1, 0, 1)
+        )
             
     def get_required_head_height_at(self, pos: torch.Tensor, offset: float) -> torch.Tensor:
         base_height = pos[:, :, 2] - self.env.get_ground_height_at(pos)
@@ -478,4 +476,3 @@ class LocoNavigation(Command):
         assert not base_upper.isnan().any()
         required_height = (base_upper + base_height - offset)
         return torch.min(required_height, dim=1, keepdim=True)[0]
-

@@ -1,6 +1,7 @@
 # @package task
 project: gallant
 name: Gallant
+# Thin IsaacBackendEnv subclass (pillar skins). Registered via gallant.env import.
 env_class: GallantEnvIsaac
 
 viewer:
@@ -39,8 +40,8 @@ input:
       .*wrist_roll.*: 0.173
       .*wrist_pitch.*: 0.293
       .*wrist_yaw.*: 0.293
-    max_delay: 2
-    alpha_range: [0.6, 1.0]
+    max_delay: 1
+    alpha_range: [0.8, 1.0]
 
 command:
   _target_: LocoNavigation
@@ -71,11 +72,12 @@ observation:
   grid_map_:
     lidar_voxel_map: {
       pattern: "n z x y", noise_std: 0.01, include_self: true,
-      num_scan: 128, random_offset: true,
+      num_scan: 128,
+      random_offset: true,
       resolution: [0.05, 0.05, 0.05],
-      # resolution: [0.05, 0.05, 0.05],
       hole_prob: 0.02,
-      obs_delay_range: [6,14],
+      # obs_delay_range: [6,14],
+      obs_delay_range: [1,1],
     }
 
 reward:
@@ -152,22 +154,22 @@ randomization:
     static_friction_range: [0.5, 2.0]
     dynamic_friction_range: [0.5, 2.0]
     restitution_range: [0.05, 0.4]
-  motor_params_armature:
-    stiffness_range:
-      .*: [0.8, 1.2]
-    damping_range:
-      .*: [0.8, 1.2]
-    armature_range:
-      .*: [1.0, 1.0]
+  # motor_params_armature:
+  #   stiffness_range:
+  #     .*: [0.8, 1.2]
+  #   damping_range:
+  #     .*: [0.8, 1.2]
+  #   armature_range:
+  #     .*: [1.0, 1.0]
   reset_joint_states_uniform:
     pos_ranges:
       .*: [-0.1, 0.1]
     vel_ranges:
       .*: [-0.1, 0.1]
     rel: true
-  perturb_body_com:
-    body_names: ["torso_link"]
-    pos_range: [-0.05, 0.05]
+  # perturb_body_com:
+  #   body_names: ["torso_link"]
+  #   pos_range: [-0.05, 0.05]
 termination:
   force_contact:
     body_names: 

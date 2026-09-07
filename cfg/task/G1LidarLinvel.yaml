@@ -1,5 +1,7 @@
 # @package task
+project: gallant
 name: GallantLinvel
+env_class: GallantEnvIsaac
 
 viewer:
   resolution: [1280, 720]
@@ -20,27 +22,28 @@ sim:
   isaac_physics_dt: 0.005
   mujoco_physics_dt: 0.002
 
-action:
-  _target_: active_adaptation.envs.mdp.action.JointPosition
-  action_scaling: 
-    .*hip_pitch.*: 0.548
-    .*hip_roll.*: 0.351
-    .*hip_yaw.*: 0.548
-    .*knee.*: 0.351
-    waist_yaw_joint: 0.541
-    waist_roll_joint: 0.439
-    waist_pitch_joint: 0.439
-    .*ankle.*: 0.439
-    .*shoulder.*: 0.173
-    .*elbow_joint: 0.173
-    .*wrist_roll.*: 0.173
-    .*wrist_pitch.*: 0.293
-    .*wrist_yaw.*: 0.293
-  max_delay: 2
-  alpha: [0.6, 1.0]
+input:
+  action:
+    _target_: JointPosition
+    action_scaling: 
+      .*hip_pitch.*: 0.548
+      .*hip_roll.*: 0.351
+      .*hip_yaw.*: 0.548
+      .*knee.*: 0.351
+      waist_yaw_joint: 0.541
+      waist_roll_joint: 0.439
+      waist_pitch_joint: 0.439
+      .*ankle.*: 0.439
+      .*shoulder.*: 0.173
+      .*elbow_joint: 0.173
+      .*wrist_roll.*: 0.173
+      .*wrist_pitch.*: 0.293
+      .*wrist_yaw.*: 0.293
+    max_delay: 2
+    alpha_range: [0.6, 1.0]
 
 command:
-  class: LocoNavigation
+  _target_: LocoNavigation
   feet_names: .*ankle_roll_link
   pelvis_names: pelvis
   robot_name: G1
@@ -53,13 +56,13 @@ command:
 observation:
   # command:
   policy:
-    command: # base x + y + pass time + rest time
+    command: {} # base x + y + pass time + rest time
     root_angvel_b:  {steps: 6, noise_std: 0.2} #0.05}
     # root_linvel_b:  {}
     gravity_multistep: {steps: 6, noise_std: 0.05} # t t-1 t-2
     joint_pos_multistep: {steps: 6, noise_std: 0.05}
     joint_vel_multistep: {steps: 6, noise_std: 0.2}
-    prev_actions: {steps: 4, permute: true}
+    prev_actions: {steps: 4}
   priv:
     root_linvel_b:    {}
     body_height:      {body_names: .*ankle_roll_link, clamp_max: 0.2}
@@ -87,9 +90,9 @@ reward:
     stall_penalty:          {weight: 1.0, enabled: true, max_vel: 0.8, min_vel: 0.4} # 0.5
     orientation_torso:      {weight: 0.5, enabled: true, body_names: ['torso_link']} # 0.1
     orientation_pelvis:     {weight: 1.0, enabled: true, body_names: ["pelvis"]} # 1.0
-    penalize_contact_body(penalize_contact): {weight: 0.2, enabled: true, body_names: ["pelvis", ".*_hip_.*_link", ".*knee.*"]} # 0.005
-    penalize_contact_hand(penalize_contact): {weight: 0.1, enabled: true, body_names: [".*(wrist|elbow).*",  ".*shoulder_.*_link"]}
-    penalize_contact_torso(penalize_contact): {weight: 1.0, enabled: true, body_names: ["torso_link"]}
+    penalize_contact_body: {_target_: penalize_contact, weight: 0.2, enabled: true, body_names: ["pelvis", ".*_hip_.*_link", ".*knee.*"]} # 0.005
+    penalize_contact_hand: {_target_: penalize_contact, weight: 0.1, enabled: true, body_names: [".*(wrist|elbow).*",  ".*shoulder_.*_link"]}
+    penalize_contact_torso: {_target_: penalize_contact, weight: 1.0, enabled: true, body_names: ["torso_link"]}
     feet_ground_parallel:   {weight: 0.1, enabled: true, body_names: .*ankle_roll_link} # 5.0
 
     linvel_z_l2_new:            {weight: 0.5, enabled: true} #0.5 stair 5x
@@ -97,17 +100,17 @@ reward:
     action_rate_l2:         {weight: 1e-2, enabled: true}
     action_rate2_l2:        {weight: 5e-3, enabled: true} # smoothness NOTE Sep1 used 5e-3 previously
 
-    hip_yaw_dev_l2(joint_deviation_l2):     {weight: 0.5, enabled: true, joint_names: [.*hip_yaw_joint]} # 0.25 0.5
-    hip_roll_dev_l2(joint_deviation_l2):     {weight: 1.0, enabled: true, joint_names: [.*hip_roll_joint]} # 0.25 0.5
-    hip_pitch_dev_l2(joint_deviation_l2):     {weight: 0.05, enabled: true, joint_names: [.*hip_pitch_joint]}
-    ankle_pitch_dev_l2(joint_deviation_l2):   {weight: 0.1, enabled: true, joint_names: ".*ankle_pitch.*"}
-    ankle_roll_dev_l2(joint_deviation_l2):   {weight: 1.5, enabled: true, joint_names: ".*ankle_roll.*"}
-    waist_roll_yaw_dev_l2(joint_deviation_l2):   {weight: 1.0, enabled: true, joint_names: ".*waist_(roll|yaw).*"} # 0.25
-    waist_pitch_dev_l2(joint_deviation_l2):   {weight: 0.5, enabled: true, joint_names: ".*waist_pitch.*"}
-    arm_roll_yaw_dev_l2(joint_deviation_l2):     {weight: 1.0, enabled: true, joint_names: [.*shoulder_(roll|yaw).*]} # 1.0
-    arm_dev_l2(joint_deviation_l2):     {weight: 0.5, enabled: true, joint_names: [.*shoulder_pitch.*, .*elbow.*]} # 1.0
-    wrist_dev_l2(joint_deviation_l2):   {weight: 1.0, enabled: true, joint_names: [.*wrist.*]} # 1.0
-    knee_dev_l2(joint_deviation_l2):   {weight: 0.02, enabled: true, joint_names: ".*knee.*"}
+    hip_yaw_dev_l2:     {_target_: joint_deviation_l2, weight: 0.5, enabled: true, joint_names: [.*hip_yaw_joint]} # 0.25 0.5
+    hip_roll_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, enabled: true, joint_names: [.*hip_roll_joint]} # 0.25 0.5
+    hip_pitch_dev_l2:     {_target_: joint_deviation_l2, weight: 0.05, enabled: true, joint_names: [.*hip_pitch_joint]}
+    ankle_pitch_dev_l2:   {_target_: joint_deviation_l2, weight: 0.1, enabled: true, joint_names: ".*ankle_pitch.*"}
+    ankle_roll_dev_l2:   {_target_: joint_deviation_l2, weight: 1.5, enabled: true, joint_names: ".*ankle_roll.*"}
+    waist_roll_yaw_dev_l2:   {_target_: joint_deviation_l2, weight: 1.0, enabled: true, joint_names: ".*waist_(roll|yaw).*"} # 0.25
+    waist_pitch_dev_l2:   {_target_: joint_deviation_l2, weight: 0.5, enabled: true, joint_names: ".*waist_pitch.*"}
+    arm_roll_yaw_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, enabled: true, joint_names: [.*shoulder_(roll|yaw).*]} # 1.0
+    arm_dev_l2:     {_target_: joint_deviation_l2, weight: 0.5, enabled: true, joint_names: [.*shoulder_pitch.*, .*elbow.*]} # 1.0
+    wrist_dev_l2:   {_target_: joint_deviation_l2, weight: 1.0, enabled: true, joint_names: [.*wrist.*]} # 1.0
+    knee_dev_l2:   {_target_: joint_deviation_l2, weight: 0.02, enabled: true, joint_names: ".*knee.*"}
 
     joint_acc_l2:           {weight: 2.5e-7, enabled: true}
     dof_pos_limits:         {weight: 1.0, enabled: true}
@@ -195,7 +198,7 @@ termination:
     - ".*_hip.*"
     - ".*knee.*"
     threshold: 100.0
-  pillar_fall: {body_names: ".*ankle_roll_link", threshold: -0.1}
-  no_moving: {thres: 1.0}
+  gallant.pillar_fall: {body_names: ".*ankle_roll_link", threshold: -0.1}
+  gallant.no_moving: {thres: 1.0}
 
   fall_over: {xy_thres: 0.8}
