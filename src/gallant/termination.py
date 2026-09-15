@@ -67,12 +67,14 @@ class no_moving(Termination[LocoNavigation]):
         self.asset = self.env.scene.articulations["robot"]
 
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
+        # Episode wall-clock, not the per-waypoint timer: after the first
+        # allotment expires the goal snaps to spawn, and standing there is
+        # intended — must not re-arm ``no_moving`` on every new budget.
         root_pos_w = self.asset.data.root_pos_w
-        origin_pos_w = self.command_manager.origin_pos_w.clone()
-        elapsed_t = self.command_manager.time_elapsed.squeeze(-1)
-        alloted = self.command_manager.time_alloted.squeeze(-1)
+        origin_pos_w = self.command_manager.origin_pos_w
+        elapsed_t = self.env.episode_length_buf.float() * self.env.step_dt
         dist = (root_pos_w - origin_pos_w)[:, :2].norm(dim=-1)
-        within_budget = elapsed_t < alloted
+        within_budget = elapsed_t < self.command_manager.time_alloted.squeeze(-1)
         return (dist < self.thres).reshape(-1, 1) & (
             (elapsed_t > 4.0) & within_budget
         ).reshape(-1, 1)

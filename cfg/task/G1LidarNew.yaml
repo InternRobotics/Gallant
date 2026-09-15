@@ -11,7 +11,7 @@ viewer:
 
 robot: 
   name: g1_waist_unlocked
-terrain: gallant_3d_test
+terrain: gallant_3d_train
 
 # common
 num_envs: 4
