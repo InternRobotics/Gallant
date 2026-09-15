@@ -91,6 +91,7 @@ class lidar_voxel_map(Observation):
         resolution: Tuple[float, float, float] = (0.1, 0.1, 0.1),
         hole_prob: float = 0.0,
         obs_delay_range: Tuple[int, int] = (5, 10),  # simulation steps
+        vis: bool = False,
     ):
         super().__init__()
         self.resolution = tuple(resolution)
@@ -104,6 +105,7 @@ class lidar_voxel_map(Observation):
         self.random_offset = random_offset
         self.hole_prob = hole_prob
         self.obs_delay_range = obs_delay_range
+        self.vis = vis
 
     def _initialize(self, env):
         super()._initialize(env)
@@ -190,7 +192,7 @@ class lidar_voxel_map(Observation):
         self.scan_time_offset[:, 1] = self._sample_back_scan_offset(self.num_envs)
 
         self.marker = None
-        if self.env.sim.has_gui():
+        if self.env.sim.has_gui() and self.vis:
             self.marker = VisualizationMarkers(
                 VisualizationMarkersCfg(
                     prim_path="/Visuals/Command/grid_map",

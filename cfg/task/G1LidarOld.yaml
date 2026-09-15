@@ -15,7 +15,6 @@ terrain: hussar_3d
 # common
 num_envs: 4
 max_episode_length: 400
-allocate_time: 10
 
 sim:
   step_dt: 0.02
@@ -44,6 +43,7 @@ command:
   robot_name: G1
   max_target_height: 1.32
   offset: 0.1
+  time_budget: [8, 10]
 
 observation:
   # command:

@@ -69,9 +69,10 @@ class no_moving(Termination[LocoNavigation]):
     def compute(self, termination: torch.Tensor) -> torch.Tensor:
         root_pos_w = self.asset.data.root_pos_w
         origin_pos_w = self.command_manager.origin_pos_w.clone()
-        ellapsed_step = self.env.episode_length_buf
+        elapsed_t = self.command_manager.time_elapsed.squeeze(-1)
+        alloted = self.command_manager.time_alloted.squeeze(-1)
         dist = (root_pos_w - origin_pos_w)[:, :2].norm(dim=-1)
+        within_budget = elapsed_t < alloted
         return (dist < self.thres).reshape(-1, 1) & (
-            (ellapsed_step > 200.0)
-            & (ellapsed_step < self.command_manager.resample_interval)
+            (elapsed_t > 4.0) & within_budget
         ).reshape(-1, 1)

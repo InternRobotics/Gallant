@@ -15,6 +15,7 @@ from active_adaptation.utils.math import (
 from isaaclab.utils.warp import raycast_mesh
 
 import warp as wp
+from typing import Tuple
 from typing_extensions import override
 from tensordict import TensorDictBase
 
@@ -145,7 +146,8 @@ class LocoNavigation(Command):
         offset: float = 0.2,
         random_command: float = False,
         stand_prob: float = 0.05,
-        reach_distance_thres: float = 0.2
+        reach_distance_thres: float = 0.2,
+        time_budget: Tuple[float, float] = (8.0, 10.0),
     ):
         super().__init__()
         self.feet_names = feet_names
@@ -157,14 +159,18 @@ class LocoNavigation(Command):
         self.random_command = random_command
         self.stand_prob = stand_prob
         self.reach_distance_thres = reach_distance_thres
+        low, high = float(time_budget[0]), float(time_budget[1])
+        if high < low:
+            raise ValueError(f"time_budget high ({high}) must be >= low ({low})")
+        self.time_budget = (low, high)
 
     @override
     def _initialize(self, env: _EnvBase) -> None:
         super()._initialize(env)
         self.use_curriculum = self._use_curriculum and self.env.training
-        self.resample_interval = int(self.env.cfg.allocate_time / self.env.step_dt)
         self.resample_distance_thres = self.reach_distance_thres
-        self.allocate_time = self.env.cfg.allocate_time
+        # Legacy step-count alias (max budget); prefer ``time_alloted`` in seconds.
+        self.resample_interval = int(self.time_budget[1] / self.env.step_dt)
         self.curri_delay_ratio = 0.0
 
         from active_adaptation.envs.terrain import BetterTerrainImporter, BetterTerrainGenerator
@@ -202,6 +208,10 @@ class LocoNavigation(Command):
             # Episode sum of reaching_target reward signal (command-owned; env.stats
             # are zeroed before reset and cannot drive curriculum).
             self.reaching_target_ep = torch.zeros(self.num_envs, 1)
+            self.budget_just_expired = torch.zeros(
+                self.num_envs, 1, dtype=torch.bool
+            )
+            self.missed_budget = torch.zeros(self.num_envs, 1, dtype=torch.bool)
         self.reaching_award_time = 2.0  # must match gallant.reward.reaching_target.award_time
 
         if self.env.sim.has_gui():
@@ -245,7 +255,7 @@ class LocoNavigation(Command):
         self.has_tree = False
         self.seed = wp.rand_init(0 + active_adaptation.get_local_rank())
 
-        from .terrain.hussar_terrain import TREE_INFOS
+        from .terrain.gallant_terrain import TREE_INFOS
         if len(TREE_INFOS) > 0:
             self.has_tree = True
             self.grid = wp.HashGrid(512, 1024, 4, device=wp.get_device(str(self.device)))
@@ -319,7 +329,7 @@ class LocoNavigation(Command):
             target_pos_b = target_pos_b + noise_pos
         
         time_elapsed = self.time_elapsed.clamp_max(self.time_alloted)
-        time_rest = self.time_alloted - self.time_elapsed
+        time_rest = (self.time_alloted - self.time_elapsed).clamp_min(0.0)
         new_command = torch.cat([
             target_pos_b[:, :2], # 2
             time_elapsed, # 1
@@ -404,18 +414,34 @@ class LocoNavigation(Command):
             env_ids=env_ids,
         )
 
-        self.time_alloted[env_ids] = self.resample_interval / 50.
         self.time_elapsed[env_ids] = 0.
+        self._sample_time_alloted(env_ids)
         self.sample_target(env_ids)
         return origins
 
+    def _sample_time_alloted(self, env_ids: torch.Tensor) -> None:
+        """Uniform sample waypoint time budget in seconds from ``time_budget``."""
+        low, high = self.time_budget
+        n = len(env_ids)
+        if high == low:
+            self.time_alloted[env_ids] = low
+            return
+        u = torch.rand(n, 1, device=self.device)
+        self.time_alloted[env_ids] = low + (high - low) * u
+
     @override
     def _update(self) -> None:
-        resample = (self.time_elapsed >= (self.resample_interval / 50.))
+        self.budget_just_expired = self.time_elapsed >= self.time_alloted
+        # Snapshot before clearing ``target_reached`` (used by ``no_reach``).
+        self.missed_budget = self.budget_just_expired & ~self.target_reached
+        resample = self.budget_just_expired
         self.target_pos_w = torch.where(resample, self.origin_pos_w, self.target_pos_w)
-        self.target_reached = torch.where(resample, 0, self.target_reached)
+        self.target_reached = torch.where(resample, False, self.target_reached)
         self.time_elapsed = torch.where(resample, 0.0, self.time_elapsed)
-        
+        if resample.any():
+            expired_ids = resample.squeeze(-1).nonzero(as_tuple=False).squeeze(-1)
+            self._sample_time_alloted(expired_ids)
+
         self.pos_diff = self.target_pos_w - self.asset.data.root_pos_w
         self.pos_diff_norm = self.pos_diff[:, :2].norm(dim=-1, keepdim=True)
         self.target_reached = (self.pos_diff_norm < self.resample_distance_thres)

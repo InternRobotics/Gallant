@@ -1099,5 +1099,6 @@ ROUGH_TERRAIN_BASE_CFG = TerrainImporterCfg(
     debug_vis=False,
 )
 
-registry.register("terrain", "hussar_3d", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=NEW_ROUGH_TERRAINS_CFG))
-registry.register("terrain", "hussar_vis", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=VIS_CFG))
+registry.register("terrain", "gallant_3d_train", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=NEW_ROUGH_TERRAINS_CFG))
+registry.register("terrain", "gallant_3d_test", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=NEW_ROUGH_TERRAINS_CFG, max_init_terrain_level=None))
+# registry.register("terrain", "hussar_vis", ROUGH_TERRAIN_BASE_CFG.replace(terrain_generator=VIS_CFG))

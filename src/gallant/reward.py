@@ -926,9 +926,10 @@ class no_reach(Reward[LocoNavigation]):
         self.asset = self.command_manager.asset
 
     def _compute(self) -> torch.Tensor:
-        interval_reached = (self.env.episode_length_buf+1) % self.command_manager.resample_interval == 0
-        penalize = interval_reached & ~self.command_manager.target_reached
-        return -100.0 * penalize.float().reshape(self.num_envs, 1)
+        # Fired on the step the waypoint budget expires without a reach.
+        return -100.0 * self.command_manager.missed_budget.float().reshape(
+            self.num_envs, 1
+        )
 
 # class solid_step(Reward[LocoNavigation]):
 #     left_foot_mesh_path = f"{PATH}/g1_29dof/meshes/left_ankle_roll_link.STL"

@@ -11,12 +11,11 @@ viewer:
 
 robot: 
   name: g1_waist_unlocked
-terrain: hussar_3d
+terrain: gallant_3d_test
 
 # common
 num_envs: 4
-max_episode_length: 499
-allocate_time: 10
+max_episode_length: 1000
 
 sim:
   step_dt: 0.02
@@ -53,18 +52,17 @@ command:
   random_command: False
   stand_prob: 0.0
   use_curriculum: true
+  time_budget: [8, 10]
 
 observation:
-  # command:
   policy:
     command: {} # base x + y + pass time + rest time
-    root_angvel_b:  {steps: 6, noise_std: 0.2} #0.05}
+    root_angvel_b:  {steps: 6, noise_std: 0.2}
     # root_linvel_b:  {}
     gravity_multistep: {steps: 6, noise_std: 0.05} # t t-1 t-2
     joint_pos_multistep: {steps: 6, noise_std: 0.05}
     joint_vel_multistep: {steps: 6, noise_std: 0.2}
     prev_actions: {steps: 4}
-    # height_scan: {x_range: [-0.8, 0.8], y_range: [-0.8, 0.8], resolution: [0.05, 0.05], flatten: true, noise_scale: 0.01}
   priv:
     height_scan: {x_range: [-0.8, 0.8], y_range: [-0.8, 0.8], resolution: [0.05, 0.05], flatten: true, noise_scale: 0.0}
     root_linvel_b:    {}
@@ -75,6 +73,7 @@ observation:
       num_scan: 128, random_offset: true,
       resolution: [0.05, 0.05, 0.05], hole_prob: 0.02,
       obs_delay_range: [1,1],
+      vis: false
     }
     # lidar_voxel_map_v2: {
     #   pattern: "n z x y", noise_std: 0.01,
@@ -93,7 +92,6 @@ reward:
     # solid_step:             {weight: 2.0, thres: 0.01}
     feet_ground_slip: {weight: 1.0, body_names: [.*ankle_roll_link]}
     feet_clearance_height:  {weight: 1.5} # platform 5x
-    
     # penalty_fast_ang_vel: {weight: 2.0, threshold: 1.0}
 
     reach_target_pos:       {weight: 2.0} # 1.0
@@ -113,8 +111,7 @@ reward:
     action_rate_l2:         {weight: 1e-2}
     action_rate2_l2:        {weight: 5e-3} # smoothness NOTE Sep1 used 5e-3 previously
 
-    hip_yaw_dev_l2:     {_target_: joint_deviation_l2, weight: 0.5, joint_names: [.*hip_yaw_joint]} # 0.25 0.5
-    hip_roll_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, joint_names: [.*hip_roll_joint]} # 0.25 0.5
+    hip_dev_l2:     {_target_: joint_deviation_l2, weight: 0.4, joint_names: [.*hip_(roll|yaw)_joint]} # 0.25 0.5
     hip_pitch_dev_l2:     {_target_: joint_deviation_l2, weight: 0.05, joint_names: [.*hip_pitch_joint]}
     ankle_pitch_dev_l2:   {_target_: joint_deviation_l2, weight: 0.1, joint_names: ".*ankle_pitch.*"}
     ankle_roll_dev_l2:   {_target_: joint_deviation_l2, weight: 1.5, joint_names: ".*ankle_roll.*"}
@@ -123,14 +120,12 @@ reward:
     arm_roll_yaw_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, joint_names: [.*shoulder_(roll|yaw).*]} # 1.0
     arm_dev_l2:       {_target_: joint_deviation_l2, weight: 0.5, joint_names: [.*shoulder_pitch.*, .*elbow.*]} # 1.0
     wrist_dev_l2:     {_target_: joint_deviation_l2, weight: 1.0, joint_names: [.*wrist.*]} # 1.0
-    knee_dev_l2:      {_target_: joint_deviation_l2, weight: 0.02, joint_names: ".*knee.*"}
-
+  regularization:
     joint_acc_l2:           {weight: 2.5e-7}
     dof_pos_limits:         {weight: 1.0}
     feet_distance_lateral:  {weight: 1.5, body_names: [.*ankle_roll.*], least_distance: 0.2, most_distance: 0.28} # 1.5
     knee_distance_lateral:  {weight: 1.5, body_names: [.*hip_yaw.*, ".*knee.*"], least_distance: 0.2, most_distance: 0.28} # 2.0
     feet_parallel:          {weight: 1.0, body_names: .*ankle_roll_link} # 1.0
-    energy_l2:              {weight: 2.0e-10}  
     feet_stumble:           {weight: 1.0, body_names: .*ankle_roll_link}
     num_foot_contact:       {weight: 2.0} #1.0
     torques_scaled:         {weight: 2.5e-6}
@@ -155,28 +150,24 @@ randomization:
   perturb_body_mass:
     (?!(pelvis|torso_link)).*: [0.8, 1.2]
     pelvis: [0.8, 1.2]
-  perturb_body_materials:
+  randomize_materials_isaac:
     body_names: ".*ankle_roll_link"
     static_friction_range: [0.5, 2.0]
     dynamic_friction_range: [0.5, 2.0]
     restitution_range: [0.05, 0.4]
-  # motor_params_armature:
-  #   stiffness_range:
-  #     .*: [0.8, 1.2]
-  #   damping_range:
-  #     .*: [0.8, 1.2]
-  #   armature_range:
-  #     .*: [1.0, 1.0]
+  actuator_pd_gains:
+    stiffness_range:
+      .*: [0.8, 1.1]
+    damping_range:
+      .*: [0.8, 1.1]
   reset_joint_states_uniform:
     pos_ranges:
       .*: [-0.1, 0.1]
     vel_ranges:
       .*: [-0.1, 0.1]
     rel: true
-  # perturb_body_com:
-  #   body_names: ["torso_link"]
-  #   pos_range: [-0.05, 0.05]
 termination:
+  max_episode_length: {}
   force_contact:
     body_names: 
     - "torso_link"

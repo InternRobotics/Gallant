@@ -15,7 +15,6 @@ terrain: hussar_3d
 # common
 num_envs: 4
 max_episode_length: 1000
-allocate_time: 10
 
 sim:
   step_dt: 0.02
@@ -52,6 +51,7 @@ command:
   random_command: False
   stand_prob: 0.0
   use_curriculum: true
+  time_budget: [8, 10]
 
 observation:
   # command:
