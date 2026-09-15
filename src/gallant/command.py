@@ -199,6 +199,10 @@ class LocoNavigation(Command):
             self.time_elapsed = torch.zeros(self.num_envs, 1)
             self.origin_pos_w = torch.zeros(self.num_envs, 3)
             self.is_standing_env = torch.zeros(self.num_envs, 1, dtype=torch.bool)
+            # Episode sum of reaching_target reward signal (command-owned; env.stats
+            # are zeroed before reset and cannot drive curriculum).
+            self.reaching_target_ep = torch.zeros(self.num_envs, 1)
+        self.reaching_award_time = 2.0  # must match gallant.reward.reaching_target.award_time
 
         if self.env.sim.has_gui():
             from isaaclab.markers import FRAME_MARKER_CFG, VisualizationMarkers
@@ -343,20 +347,28 @@ class LocoNavigation(Command):
     @override
     def reset(self, env_ids: torch.Tensor, tensordict: TensorDictBase) -> torch.Tensor:
         if self.use_curriculum and self.env.episode_count > 1 and self.env.training:
-            move_up = (self.env.stats['loco']['reaching_target'] > 2.0).reshape(self.num_envs)[env_ids]
-            move_down = (self.env.stats['loco']['reaching_target'] < 1.0).reshape(self.num_envs)[env_ids]
+            reaching = self.reaching_target_ep[env_ids]
+            move_up = (reaching > 2.0).squeeze(-1)
+            move_down = (reaching < 1.0).squeeze(-1)
+            move_up = move_up & ~move_down
             self.terrain_importer.update_env_origins(env_ids, move_up, move_down)
             self._origins = self.terrain_importer.env_origins.clone()
-            self.env.extra["curriculum/terrain_level"] = self.terrain_importer.terrain_levels.float().mean()
+            self.env.extra["curriculum/terrain_level"] = (
+                self.terrain_importer.terrain_levels.float().mean()
+            )
+            self.env.extra["curriculum/reaching_target_ep"] = (
+                self.reaching_target_ep.mean()
+            )
         self.env.extra["curriculum/curri_delay_ratio"] = self.curri_delay_ratio
+        self.reaching_target_ep[env_ids] = 0.0
 
         init_root_state = self.init_root_state[env_ids].clone()
 
         if self.terrain_type == "plane":
             origins = self.env.scene.env_origins[env_ids]
         elif self.terrain_type == "generator":
-            idx = torch.randint(0, len(self._origins), (len(env_ids),), device=self.device)
-            origins = self._origins[idx]
+            # Use this env's curriculum-updated origin (not a random other env).
+            origins = self._origins[env_ids]
         elif self.terrain_type == "usd":
             idx = torch.multinomial(torch.ones(len(self._origins), device=self.device).expand(len(env_ids), -1), 2, replacement=False)
             origins = self._origins[idx[:, 0]]
@@ -409,6 +421,14 @@ class LocoNavigation(Command):
         self.target_reached = (self.pos_diff_norm < self.resample_distance_thres)
         self.time_elapsed += self.env.step_dt
         self.compute_target_head_height()
+
+        # Same unweighted indicator as gallant.reward.reaching_target (weight=1 in YAML).
+        in_award_window = (
+            self.time_alloted - self.time_elapsed < self.reaching_award_time
+        )
+        self.reaching_target_ep.add_(
+            (self.target_reached & in_award_window).float()
+        )
     
     def compute_target_head_height(self):
         target_vec = self.target_pos_w[:, :2] - self.asset.data.root_pos_w[:, :2]
